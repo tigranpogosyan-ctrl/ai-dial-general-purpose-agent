@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, Tuple, List
 
 import faiss
 import numpy as np
@@ -13,93 +13,170 @@ from task.tools.models import ToolCallParams
 from task.tools.rag.document_cache import DocumentCache
 from task.utils.dial_file_conent_extractor import DialFileContentExtractor
 
-# TODO: provide system prompt for Generation step
-_SYSTEM_PROMPT = """
+
+_SYSTEM_PROMPT = """You are a helpful assistant that answers questions based on provided document context.
+
+- Use ONLY the provided context
+- If insufficient info → say so clearly
+- Be concise and direct
 """
 
 
 class RagTool(BaseTool):
-    """
-    Performs semantic search on documents to find and answer questions based on relevant content.
-    Supports: PDF, TXT, CSV, HTML.
-    """
 
-    def __init__(self, endpoint: str, deployment_name: str, document_cache: DocumentCache):
-        #TODO:
-        # 1. Set endpoint
-        # 2. Set deployment_name
-        # 3. Set document_cache. DocumentCache is implemented, relate to it as to centralized Dict with file_url (as key),
-        #    and indexed embeddings (as value), that have some autoclean. This cache will allow us to speed up RAG search.
-        # 4. Create SentenceTransformer and set is as `model` with:
-        #   - model_name_or_path='all-MiniLM-L6-v2', it is self hosted lightwait embedding model.
-        #     More info: https://medium.com/@rahultiwari065/unlocking-the-power-of-sentence-embeddings-with-all-minilm-l6-v2-7d6589a5f0aa
-        #   - Optional! You can set it use CPU forcefully with `device='cpu'`, in case if not set up then will use GPU if it has CUDA cores
-        # 5. Create RecursiveCharacterTextSplitter as `text_splitter` with:
-        #   - chunk_size=500
-        #   - chunk_overlap=50
-        #   - length_function=len
-        #   - separators=["\n\n", "\n", ". ", " ", ""]
-        raise NotImplementedError()
+    def __init__(
+        self,
+        endpoint: str,
+        deployment_name: str,
+        document_cache: DocumentCache,
+        model: SentenceTransformer | None = None,
+        text_splitter: RecursiveCharacterTextSplitter | None = None,
+    ):
+        self.endpoint = endpoint
+        self.deployment_name = deployment_name
+        self.document_cache = document_cache
+
+        # Inject dependencies (testable + reusable)
+        self.model = model or SentenceTransformer("all-MiniLM-L6-v2")
+        self.text_splitter = text_splitter or RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
+
+        self.file_extractor = DialFileContentExtractor(endpoint, api_key=None)
+
+    # -------------------------
+    # Metadata
+    # -------------------------
 
     @property
     def show_in_stage(self) -> bool:
-        # TODO: set as False since we will have custom variant of representation in Stage
-        raise NotImplementedError()
+        return False
 
     @property
     def name(self) -> str:
-        # TODO: provide self-descriptive name
-        raise NotImplementedError()
+        return "rag_tool"
 
     @property
     def description(self) -> str:
-        # TODO: provide tool description that will help LLM to understand when to use this tools and cover 'tricky'
-        #  moments (not more 1024 chars)
-        raise NotImplementedError()
+        return (
+            "Semantic document search tool. "
+            "Use for answering questions about document content (PDF, TXT, CSV, HTML)."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
-        # TODO: provide tool parameters JSON Schema:
-        #  - request is string, description: "The search query or question to search for in the document", required
-        #  - file_url is string, required
-        raise NotImplementedError()
+        return {
+            "type": "object",
+            "properties": {
+                "request": {"type": "string"},
+                "file_url": {"type": "string"},
+            },
+            "required": ["request", "file_url"],
+        }
 
+    # -------------------------
+    # Execution
+    # -------------------------
 
-    async def _execute(self, tool_call_params: ToolCallParams) -> str | Message:
-        #TODO:
-        # 1. Load arguments with `json`
-        # 2. Get `request` from arguments
-        # 3. Get `file_url` from arguments
-        # 4. Get stage from `tool_call_params`
-        # 5. Append content to stage: "## Request arguments: \n"
-        # 6. Append content to stage: `f"**Request**: {request}\n\r"`
-        # 7. Append content to stage: `f"**File URL**: {file_url}\n\r"`
-        # 8. Create `cache_document_key`, it is string from `conversation_id` and `file_url`, with such key we guarantee
-        #    access to cached indexes for one particular conversation,
-        # 9. Get from `document_cache` by `cache_document_key` a cache
-        # 10. If cache is present then set it as `index, chunks = cached_data` (cached_data is retrieved cache from 9 step),
-        #     otherwise:
-        #       - Create DialFileContentExtractor and extract text by `file_url` as `text_content`
-        #       - If no `text_content` then appen to stage info about it ans return the string with the error that file content is not found
-        #       - Create `chunks` with `text_splitter`
-        #       - Create `embeddings` with `model`
-        #       - Create IndexFlatL2 with `384` dimensions as `index` (more about IndexFlatL2 https://shayan-fazeli.medium.com/faiss-a-quick-tutorial-to-efficient-similarity-search-595850e08473)
-        #       - Add to `index` np.array with created embeddings as type 'float32'
-        #       - Add to `document_cache`
-        # 11. Prepare `query_embedding` with model. You need to encode request as type 'float32'
-        # 12. Through created index make search with `query_embedding`, `k` set as 3. As response we expect tuple of
-        #     `distances` and `indices`
-        # 13. Now you need to iterate through `indices[0]` and and by each idx get element from `chunks`, result save as `retrieved_chunks`
-        # 14. Make augmentation
-        # 15. Append content to stage: "## RAG Request: \n"
-        # 16. Append content to stage: `ff"```text\n\r{augmented_prompt}\n\r```\n\r"` (will be shown as markdown text)
-        # 17. Append content to stage: "## Response: \n"
-        # 18. Now make Generation with AsyncDial (don't forget about api_version '025-01-01-preview, provide LLM with system prompt and augmented prompt and:
-        #   - stream response to stage (user in real time will be able to see what the LLM responding while Generation step)
-        #   - collect all content (we need to return it as tool execution result)
-        # 19. return collected content
-        raise NotImplementedError()
+    async def _execute(self, params: ToolCallParams) -> str | Message:
+        args = self._parse_args(params)
+        request = args["request"]
+        file_url = args["file_url"]
 
-    def __augmentation(self, request: str, chunks: list[str]) -> str:
-        #TODO: make prompt augmentation
-        raise NotImplementedError()
+        self._log_request(params, request, file_url)
+
+        index, chunks = await self._get_or_create_index(params, file_url)
+
+        if not chunks:
+            return self._fail(params, "File content not found")
+
+        retrieved_chunks = self._search(index, chunks, request)
+        prompt = self._build_prompt(request, retrieved_chunks)
+
+        self._log_prompt(params, prompt)
+
+        return await self._generate_answer(params, prompt)
+
+    # -------------------------
+    # Steps (SRP)
+    # -------------------------
+
+    def _parse_args(self, params: ToolCallParams) -> dict:
+        return json.loads(params.tool_call.function.arguments)
+
+    def _log_request(self, params: ToolCallParams, request: str, file_url: str):
+        stage = params.stage
+        stage.append_content("## Request\n")
+        stage.append_content(f"**Query**: {request}\n")
+        stage.append_content(f"**File**: {file_url}\n")
+
+    async def _get_or_create_index(
+        self, params: ToolCallParams, file_url: str
+    ) -> Tuple[faiss.Index, List[str]]:
+
+        cache_key = f"{params.conversation_id}:{file_url}"
+        cached = self.document_cache.get(cache_key)
+
+        if cached:
+            return cached
+
+        extractor = DialFileContentExtractor(self.endpoint, params.api_key)
+        text = extractor.extract_text(file_url)
+
+        if not text:
+            return None, []
+
+        chunks = self.text_splitter.split_text(text)
+        embeddings = self.model.encode(chunks).astype("float32")
+
+        index = faiss.IndexFlatL2(embeddings.shape[1])
+        index.add(embeddings)
+
+        self.document_cache.set(cache_key, index, chunks)
+        return index, chunks
+
+    def _search(
+        self, index: faiss.Index, chunks: List[str], query: str
+    ) -> List[str]:
+        query_embedding = self.model.encode([query]).astype("float32")
+
+        k = min(3, len(chunks))
+        _, indices = index.search(query_embedding, k)
+
+        return [chunks[i] for i in indices[0]]
+
+    def _build_prompt(self, request: str, chunks: List[str]) -> str:
+        context = "\n\n".join(chunks)
+        return f"CONTEXT:\n{context}\n---\nREQUEST: {request}"
+
+    def _log_prompt(self, params: ToolCallParams, prompt: str):
+        params.stage.append_content("## RAG Prompt\n```text\n")
+        params.stage.append_content(prompt)
+        params.stage.append_content("\n```\n")
+
+    async def _generate_answer(self, params: ToolCallParams, prompt: str) -> str:
+        dial = AsyncDial(base_url=self.endpoint, api_key=params.api_key)
+
+        stream = await dial.chat.completions.create(
+            messages=[
+                {"role": Role.SYSTEM, "content": _SYSTEM_PROMPT},
+                {"role": Role.USER, "content": prompt},
+            ],
+            deployment_name=self.deployment_name,
+            stream=True,
+        )
+
+        content = ""
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                params.stage.append_content(delta.content)
+                content += delta.content
+
+        return content
+
+    def _fail(self, params: ToolCallParams, message: str) -> str:
+        params.stage.append_content(f"## Error\n{message}\n")
+        return message

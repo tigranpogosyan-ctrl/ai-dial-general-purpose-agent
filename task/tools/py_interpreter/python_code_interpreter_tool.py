@@ -14,97 +14,147 @@ from task.tools.models import ToolCallParams
 
 
 class PythonCodeInterpreterTool(BaseTool):
-    """
-    Uses https://github.com/khshanovskyi/mcp-python-code-interpreter PyInterpreter MCP Server.
-
-    ⚠️ Pay attention that this tool will wrap all the work with PyInterpreter MCP Server.
-    """
 
     def __init__(
-            self,
-            mcp_client: MCPClient,
-            mcp_tool_models: list[MCPToolModel],
-            tool_name: str,
-            dial_endpoint: str,
+        self,
+        mcp_client: MCPClient,
+        tool: MCPToolModel,
+        dial_endpoint: str,
     ):
-        """
-        :param tool_name: it must be actual name of tool that executes code. It is 'execute_code'.
-            https://github.com/khshanovskyi/mcp-python-code-interpreter/blob/main/interpreter/server.py#L303
-        """
-        #TODO:
-        # 1. Set dial_endpoint
-        # 2. Set mcp_client
-        # 3. Set _code_execute_tool: Optional[MCPToolModel] as None at start, then iterate through `mcp_tool_models` and
-        #    if any of tool model has the same same as `tool_name` then set _code_execute_tool as tool model
-        # 4. If `_code_execute_tool` is null then raise error (We cannot set up PythonCodeInterpreterTool without tool that executes code)
-        raise NotImplementedError()
+        self._mcp_client = mcp_client
+        self._tool = tool
+        self.dial_endpoint = dial_endpoint
+
+    # -------------------------
+    # Factory
+    # -------------------------
 
     @classmethod
     async def create(
-            cls,
-            mcp_url: str,
-            tool_name: str,
-            dial_endpoint: str,
-    ) -> 'PythonCodeInterpreterTool':
-        """Async factory method to create PythonCodeInterpreterTool"""
-        #TODO:
-        # 1. Create MCPClient
-        # 2. Get tools
-        # 3. Create PythonCodeInterpreterTool instance and return it
-        raise NotImplementedError()
+        cls,
+        mcp_url: str,
+        tool_name: str,
+        dial_endpoint: str,
+    ) -> "PythonCodeInterpreterTool":
+
+        mcp_client = await MCPClient.create(mcp_url)
+        tools = await mcp_client.get_tools()
+
+        tool = next((t for t in tools if t.name == tool_name), None)
+        if not tool:
+            raise ValueError(f"Tool '{tool_name}' not found in MCP")
+
+        return cls(mcp_client, tool, dial_endpoint)
+
+    # -------------------------
+    # Metadata
+    # -------------------------
 
     @property
     def show_in_stage(self) -> bool:
-        # TODO: set as False since we will have custom variant of representation in Stage
-        raise NotImplementedError()
+        return False
 
     @property
     def name(self) -> str:
-        # TODO: provide `_code_execute_tool` name
-        raise NotImplementedError()
+        return self._tool.name
 
     @property
     def description(self) -> str:
-        # TODO: provide `_code_execute_tool` description
-        raise NotImplementedError()
+        return self._tool.description
 
     @property
     def parameters(self) -> dict[str, Any]:
-        # TODO: provide `_code_execute_tool` parameters
-        raise NotImplementedError()
+        return self._tool.parameters
 
-    async def _execute(self, tool_call_params: ToolCallParams) -> str | Message:
-        #TODO:
-        # 1. Load arguments with `json`
-        # 2. Get `code` from arguments
-        # 3. Get `session_id` from arguments (it is optional parameter, use get method)
-        # 4. Get stage from `tool_call_params`
-        # 5. Append content to stage: "## Request arguments: \n"
-        # 6. Append content to stage: `"```python\n\r{code}\n\r```\n\r"` it will show code in stage as python markdown
-        # 7. Append session to stage:
-        #       - if `session_id` is present and not 0 then append to stage `f"**session_id**: {session_id}\n\r"`
-        #       - otherwise append "New session will be created\n\r"
-        # 8. Make tool call
-        # 9. Load retrieved response as json (️⚠️ here can be potential issues if you didn't properly implemented
-        #    MCPClient tool call, it must return string)
-        # 10. Validate result with _ExecutionResult (it is full copy of https://github.com/khshanovskyi/mcp-python-code-interpreter/blob/main/interpreter/models.py)
-        # 11. If execution_result contains files we need to pool files from PyInterpreter and upload them to DIAL bucked:
-        #       - Create Dial client
-        #       - Get with client `my_appdata_home` path as `files_home`
-        #       - Iterated through files and:
-        #           - get file name and mime_type and assign to appropriate variables
-        #           - get resource with mcp client by URL from file (https://github.com/khshanovskyi/mcp-python-code-interpreter/blob/main/interpreter/server.py#L429)
-        #           - according to MCP binary resources must be encoded with base64 https://modelcontextprotocol.io/specification/2025-06-18/server/resources#binary-content
-        #             Check if mime_type starts with `text/` or some of 'application/json', 'application/xml', is yes
-        #             then encode resource with 'utf-8' format (text will be present as bytes to upload to DIAL bucket).
-        #             Otherwise (binary file) decode it with `b64decode`
-        #           - Prepare URL to upload downloaded file: f"files/{(files_home / file_name).as_posix()}"
-        #           - Upload file with DIAL client
-        #           - Prepare Attachment with url, type (mime_type), and title (file_name)
-        #           - Add attachment to stage and also add this attachment to choice (it will be chown in both stage and choice)
-        #       - Add to execution_result json addition
-        # 12. Check if execution_result output present and if yes iterate through all output results and cut it length
-        #     to 1000 chars, it is needed to avoid high costs and context window overload
-        # 13. Append to stage response f"```json\n\r{execution_result.model_dump_json(indent=2)}\n\r```\n\r"
-        # 14. Return execution result as string (model_dump_json method)
-        raise NotImplementedError()
+    # -------------------------
+    # Execution
+    # -------------------------
+
+    async def _execute(self, params: ToolCallParams) -> str | Message:
+        args = self._parse_args(params)
+
+        self._log_request(params, args)
+
+        result = await self._call_mcp(args)
+
+        await self._handle_files(params, result)
+
+        self._truncate_output(result)
+        self._log_result(params, result)
+
+        return StrictStr(result.model_dump_json())
+
+    # -------------------------
+    # Steps (SRP)
+    # -------------------------
+
+    def _parse_args(self, params: ToolCallParams) -> dict:
+        return json.loads(params.tool_call.function.arguments)
+
+    def _log_request(self, params: ToolCallParams, args: dict):
+        stage = params.stage
+        code = args["code"]
+        session_id = args.get("session_id")
+
+        stage.append_content("## Request\n")
+        stage.append_content(f"```python\n{code}\n```\n")
+
+        if session_id:
+            stage.append_content(f"**session_id**: {session_id}\n")
+        else:
+            stage.append_content("New session will be created\n")
+
+        stage.append_content("## Response\n")
+
+    async def _call_mcp(self, args: dict) -> _ExecutionResult:
+        raw = await self._mcp_client.call_tool(self.name, args)
+        return _ExecutionResult.model_validate(json.loads(raw))
+
+    async def _handle_files(self, params: ToolCallParams, result: _ExecutionResult):
+        if not result.files:
+            return
+
+        dial = Dial(base_url=self.dial_endpoint, api_key=params.api_key)
+        files_home = dial.my_appdata_home()
+
+        for file in result.files:
+            attachment = await self._process_file(file, dial, files_home)
+
+            params.stage.add_attachment(attachment)
+            params.choice.add_attachment(attachment)
+
+        result.instructions = (
+            "Files generated. DO NOT include file links in response."
+        )
+
+    async def _process_file(self, file, dial: Dial, files_home) -> Attachment:
+        resource = await self._mcp_client.get_resource(AnyUrl(file.uri))
+
+        file_data = self._decode_file(resource, file.mime_type)
+
+        url = f"files/{(files_home / file.name).as_posix()}"
+        dial.files.upload(url=url, file=file_data)
+
+        return Attachment(
+            url=StrictStr(url),
+            type=StrictStr(file.mime_type),
+            title=StrictStr(file.name),
+        )
+
+    def _decode_file(self, resource: str, mime_type: str) -> bytes:
+        if mime_type.startswith("text/") or mime_type in {
+            "application/json",
+            "application/xml",
+        }:
+            return resource.encode("utf-8")
+
+        return base64.b64decode(resource)
+
+    def _truncate_output(self, result: _ExecutionResult):
+        if result.output:
+            result.output = [o[:200] for o in result.output]
+
+    def _log_result(self, params: ToolCallParams, result: _ExecutionResult):
+        params.stage.append_content("```json\n")
+        params.stage.append_content(result.model_dump_json(indent=2))
+        params.stage.append_content("\n```\n")

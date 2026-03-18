@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Union
 
 from aidial_client.types.chat import ToolParam, FunctionParam
 from aidial_client.types.chat.legacy.chat_completion import Role
@@ -10,23 +10,64 @@ from task.tools.models import ToolCallParams
 
 
 class BaseTool(ABC):
+    """
+    Base class for all tools.
+    Provides unified execution flow, error handling, and schema generation.
+    """
 
     async def execute(self, tool_call_params: ToolCallParams) -> Message:
-        #TODO:
-        # 1. Create Message obj with:
-        #       - role=Role.TOOL
-        #       - name=StrictStr(tool_call_params.tool_call.function.name)
-        #       - tool_call_id=StrictStr(tool_call_params.tool_call.id)
-        # 2. We will use Template method pattern here, so:
-        #       - Open `try-except` block
-        #       - In `try` block call`_execute` method, then check if result isinstance of Message, if yes then
-        #         assign result to created message in 1st step, otherwise set Message `content` as StrictStr(result)
-        #       - In `except` block intercept Exception and add it properly to Message `content`
-        # 3. Return created message
-        raise NotImplementedError()
+        """
+        Public execution wrapper.
+        Handles:
+        - message creation
+        - error handling
+        - result normalization
+        """
+        base_msg = self._create_base_message(tool_call_params)
+
+        try:
+            result = await self._execute(tool_call_params)
+            return self._normalize_result(result, base_msg)
+
+        except Exception as e:
+            return self._handle_error(e, base_msg)
+
+    # -------------------------
+    # Internal helpers
+    # -------------------------
+
+    def _create_base_message(self, tool_call_params: ToolCallParams) -> Message:
+        return Message(
+            role=Role.TOOL,
+            name=StrictStr(tool_call_params.tool_call.function.name),
+            tool_call_id=StrictStr(tool_call_params.tool_call.id),
+        )
+
+    def _normalize_result(
+        self,
+        result: Union[str, Message],
+        base_msg: Message
+    ) -> Message:
+        if isinstance(result, Message):
+            return result
+
+        base_msg.content = StrictStr(str(result))
+        return base_msg
+
+    def _handle_error(self, error: Exception, base_msg: Message) -> Message:
+        # In production: replace with logging
+        base_msg.content = StrictStr(
+            f"[ERROR] Tool execution failed: {type(error).__name__}: {error}"
+        )
+        return base_msg
+
+    # -------------------------
+    # Abstract API
+    # -------------------------
 
     @abstractmethod
-    async def _execute(self, tool_call_params: ToolCallParams) -> str | Message:
+    async def _execute(self, tool_call_params: ToolCallParams) -> Union[str, Message]:
+        """Core business logic of the tool."""
         pass
 
     @property
@@ -36,30 +77,32 @@ class BaseTool(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
+        """Unique tool name."""
         pass
 
     @property
     @abstractmethod
     def description(self) -> str:
+        """Human-readable description."""
         pass
 
     @property
     @abstractmethod
     def parameters(self) -> dict[str, Any]:
+        """JSON schema for tool parameters."""
         pass
+
+    # -------------------------
+    # Schema
+    # -------------------------
 
     @property
     def schema(self) -> ToolParam:
-        """Provides tool schema according to DIAL specification."""
-        #TODO:
-        # see https://dialx.ai/dial_api#operation/sendChatCompletionRequest -> `tools`
-        # or https://platform.openai.com/docs/guides/function-calling#defining-functions
-        raise NotImplementedError()
         return ToolParam(
             type="function",
             function=FunctionParam(
                 name=self.name,
                 description=self.description,
-                parameters=self.parameters
-            )
+                parameters=self.parameters,
+            ),
         )

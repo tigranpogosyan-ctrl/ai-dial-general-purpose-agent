@@ -1,5 +1,6 @@
 import io
 from pathlib import Path
+from typing import Callable, Dict
 
 import pdfplumber
 import pandas as pd
@@ -8,42 +9,62 @@ from bs4 import BeautifulSoup
 
 
 class DialFileContentExtractor:
-
     def __init__(self, endpoint: str, api_key: str):
-        #TODO:
-        # Set Dial client with endpoint as base_url and api_key
-        raise NotImplementedError()
+        self.dial_client = Dial(base_url=endpoint, api_key=api_key)
+
+        # Strategy pattern: map extensions to handlers
+        self._handlers: Dict[str, Callable[[bytes], str]] = {
+            ".txt": self._handle_txt,
+            ".pdf": self._handle_pdf,
+            ".csv": self._handle_csv,
+            ".html": self._handle_html,
+            ".htm": self._handle_html,
+        }
 
     def extract_text(self, file_url: str) -> str:
-        #TODO:
-        # 1. Download with Dial client file by `file_url` (files -> download)
-        # 2. Get downloaded file name and content
-        # 3. Get file extension, use for this `Path(filename).suffix.lower()`
-        # 4. Call `__extract_text` and return its result
-        raise NotImplementedError()
+        response = self.dial_client.files.download(file_url)
 
-    def __extract_text(self, file_content: bytes, file_extension: str, filename: str) -> str:
-        """Extract text content based on file type."""
-        #TODO:
-        # Wrap in `try-except` block:
-        # try:
-        #   1. if `file_extension` is '.txt' then return `file_content.decode('utf-8', errors='ignore')`
-        #   2. if `file_extension` is '.pdf' then:
-        #       - load it with `io.BytesIO(file_content)`
-        #       - with pdfplumber.open PDF files bites
-        #       - iterate through created pages adn create array with extracted page text
-        #       - return it joined with `\n`
-        #   3. if `file_extension` is '.csv' then:
-        #       - decode `file_content` with encoding 'utf-8' and errors='ignore'
-        #       - create csv buffer from `io.StringIO(decoded_text_content)`
-        #       - read csv with pandas (pd) as dataframe
-        #       - return dataframe to markdown (index=False)
-        #   4. if `file_extension` is in ['.html', '.htm'] then:
-        #       - decode `file_content` with encoding 'utf-8' and errors='ignore'
-        #       - create BeautifulSoup with decoded html content, features set as 'html.parser' as `soup`
-        #       - remove script and style elements: iterate through `soup(["script", "style"])` and `decompose` those scripts
-        #       - return `soup.get_text(separator='\n', strip=True)`
-        #   5. otherwise return it as decoded `file_content` with encoding 'utf-8' and errors='ignore'
-        # except:
-        #   print an error and return empty string
-        raise NotImplementedError()
+        file_content = response.get_content()
+        file_extension = Path(response.filename).suffix.lower()
+
+        handler = self._handlers.get(file_extension, self._handle_default)
+        return self._safe_execute(handler, file_content, response.filename)
+
+    # -------------------------
+    # Handlers
+    # -------------------------
+
+    def _handle_txt(self, content: bytes) -> str:
+        return content.decode("utf-8", errors="ignore")
+
+    def _handle_pdf(self, content: bytes) -> str:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            return "\n\n".join(
+                page.extract_text() or "" for page in pdf.pages
+            ).strip()
+
+    def _handle_csv(self, content: bytes) -> str:
+        df = pd.read_csv(io.StringIO(content.decode("utf-8", errors="ignore")))
+        return df.to_markdown(index=False)
+
+    def _handle_html(self, content: bytes) -> str:
+        soup = BeautifulSoup(content, "html.parser")
+
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+
+        return soup.get_text(separator="\n", strip=True)
+
+    def _handle_default(self, content: bytes) -> str:
+        return content.decode("utf-8", errors="ignore")
+
+    # -------------------------
+    # Error handling
+    # -------------------------
+
+    def _safe_execute(self, handler: Callable[[bytes], str], content: bytes, filename: str) -> str:
+        try:
+            return handler(content)
+        except Exception as e:
+            print(f"[ERROR] Failed to process file '{filename}': {e}")
+            return ""
